@@ -1,4 +1,4 @@
-# ComfyUI-FrontendPatches
+# ComfyUI-DynamicInputsHotFix
 
 Fixes for building custom nodes with dynamic input slots and custom editors in ComfyUI.
 
@@ -52,7 +52,7 @@ Key points:
 
 ## Settings
 
-Both patches can be toggled off in ComfyUI Settings → FrontendPatches. Useful for testing if ComfyUI fixed these upstream.
+Both patches can be toggled off in ComfyUI Settings. Useful for testing if ComfyUI fixed these upstream.
 
 ## Compatibility
 
