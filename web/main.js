@@ -2,7 +2,7 @@
  * ComfyUI-FrontendPatches
  *
  * Two patches for custom node development:
- * 1. ChangeTracker - Spoof tagName so contentEditable gets proper undo/redo
+ * 1. ChangeTracker - Intercept Ctrl+Z/Y in editable elements before ChangeTracker sees them
  * 2. Node Selection - Prevent node selection when clicking in custom UI
  *
  * Settings stored in localStorage to toggle patches for debugging.
@@ -32,44 +32,58 @@ function setSetting(key, value) {
 }
 
 // ============================================================================
-// Patch 1: ChangeTracker (tagName spoof)
+// Patch 1: ChangeTracker Undo/Redo Interception
 // ============================================================================
+//
+// Problem: ComfyUI's ChangeTracker listens for Ctrl+Z/Y globally and triggers
+// workflow undo/redo. It only skips native INPUT and TEXTAREA elements,
+// not contentEditable or CodeMirror editors.
+//
+// Solution: Add a capture-phase keydown listener that runs BEFORE ChangeTracker's
+// listener. When we detect Ctrl+Z/Y in an editable element, we call
+// stopImmediatePropagation() to prevent ChangeTracker from seeing the event.
+//
+// This is cleaner than the old tagName spoof approach because:
+// - No global prototype patching
+// - Only affects Ctrl+Z/Y keydown events
+// - Easy to understand and debug
+//
 
 ;(function patchChangeTracker() {
-    if (!getSetting('tagNameSpoof', true)) {
-        console.log('[FrontendPatches] Patch 1: tagName spoof DISABLED');
+    if (!getSetting('undoInterception', true)) {
+        console.log('[FrontendPatches] Patch 1: Undo interception DISABLED');
         return;
     }
 
-    const originalDescriptor = Object.getOwnPropertyDescriptor(Element.prototype, 'tagName');
-    if (!originalDescriptor) {
-        console.warn('[FrontendPatches] Could not get tagName descriptor');
-        return;
-    }
+    // Selectors for editable elements
+    const EDITABLE_SELECTORS = [
+        '[contenteditable="true"]',
+        '.cm-editor',
+        '.cm-content',
+    ].join(',');
 
-    Object.defineProperty(Element.prototype, 'tagName', {
-        get: function() {
-            const realTagName = originalDescriptor.get.call(this);
+    // Capture-phase listener runs BEFORE ChangeTracker's listener
+    window.addEventListener('keydown', (e) => {
+        // Only care about Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z (redo)
+        if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+        const key = e.key.toUpperCase();
+        if (key !== 'Z' && key !== 'Y') return;
 
-            // Spoof for any contentEditable element
-            if (realTagName === 'DIV' && this.contentEditable === 'true') {
-                return 'INPUT';
-            }
+        // Check if we're in an editable element
+        const el = document.activeElement;
+        if (
+            el?.tagName === 'INPUT' ||
+            el?.tagName === 'TEXTAREA' ||
+            el?.isContentEditable ||
+            el?.closest?.(EDITABLE_SELECTORS)
+        ) {
+            // Stop ChangeTracker from seeing this event
+            // The editor will handle undo/redo natively
+            e.stopImmediatePropagation();
+        }
+    }, true);  // <-- capture phase, runs first
 
-            // Spoof for CodeMirror elements specifically
-            if (realTagName === 'DIV' && this.closest?.('.cm-editor')) {
-                if (this.classList?.contains('cm-content')) {
-                    return 'INPUT';
-                }
-            }
-
-            return realTagName;
-        },
-        configurable: true,
-        enumerable: true
-    });
-
-    console.log('[FrontendPatches] Patch 1: tagName spoof applied');
+    console.log('[FrontendPatches] Patch 1: Undo interception applied');
 })();
 
 // ============================================================================
@@ -181,7 +195,7 @@ app.registerExtension({
     async setup() {
         // Track initial values to detect changes
         const initialValues = {
-            tagNameSpoof: getSetting('tagNameSpoof', true),
+            undoInterception: getSetting('undoInterception', true),
             nodeSelectionPrevention: getSetting('nodeSelectionPrevention', true),
         };
         let currentValues = { ...initialValues };
@@ -189,7 +203,7 @@ app.registerExtension({
 
         function checkForChanges() {
             const changed =
-                currentValues.tagNameSpoof !== initialValues.tagNameSpoof ||
+                currentValues.undoInterception !== initialValues.undoInterception ||
                 currentValues.nodeSelectionPrevention !== initialValues.nodeSelectionPrevention;
 
             if (changed && !restartAlert) {
@@ -223,14 +237,14 @@ app.registerExtension({
 
         // Register settings in ComfyUI settings panel
         app.ui?.settings?.addSetting?.({
-            id: `${SETTINGS_KEY}.tagNameSpoof`,
-            name: 'Patch 1: tagName Spoof (Ctrl+Z fix)',
-            tooltip: 'Fixes Ctrl+Z/Y in contentEditable and CodeMirror editors. Without this, Ctrl+Z deletes the node instead of undoing text.',
+            id: `${SETTINGS_KEY}.undoInterception`,
+            name: 'Patch 1: Undo Interception (Ctrl+Z fix)',
+            tooltip: 'Intercepts Ctrl+Z/Y in contentEditable and CodeMirror editors before ChangeTracker sees them. Without this, Ctrl+Z deletes the node instead of undoing text.',
             type: 'boolean',
             defaultValue: true,
             onChange: (value) => {
-                setSetting('tagNameSpoof', value);
-                currentValues.tagNameSpoof = value;
+                setSetting('undoInterception', value);
+                currentValues.undoInterception = value;
                 checkForChanges();
             },
         });

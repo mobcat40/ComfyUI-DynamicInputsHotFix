@@ -36,13 +36,18 @@ Restart ComfyUI. Find the demo node under `FrontendPatches` category.
 
 ## The Patches
 
-### Patch 1: Ctrl+Z Fix
+### Patch 1: Ctrl+Z Fix (Undo Interception)
 
-ComfyUI's undo system only knows about `<input>` and `<textarea>`. When you press Ctrl+Z in a contentEditable div, it deletes your node instead of undoing your text.
+ComfyUI's `ChangeTracker` listens for Ctrl+Z/Y globally to trigger workflow undo/redo. It only skips native `<input>` and `<textarea>` elements, not contentEditable or CodeMirror editors. When you press Ctrl+Z in a contentEditable div, it deletes your node instead of undoing your text.
 
-The fix spoofs `Element.prototype.tagName` to return `'INPUT'` for contentEditable elements.
+The fix adds a capture-phase keydown listener that runs *before* ChangeTracker. When Ctrl+Z/Y is pressed in an editable element, it calls `stopImmediatePropagation()` to prevent ChangeTracker from seeing the event. The editor then handles undo/redo natively.
 
-### Patch 2: Click Fix
+This is cleaner than the old `tagName` spoof approach:
+- No global prototype patching
+- Only affects Ctrl+Z/Y keydown events
+- Easy to understand and debug
+
+### Patch 2: Click Fix (Node Selection Prevention)
 
 When you click inside a custom editor, ComfyUI selects the node and highlights all connected wires. Annoying flicker.
 
