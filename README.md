@@ -1,5 +1,13 @@
 # ComfyUI-DynamicInputsHotFix
 
+<p align="center">
+  <img src="images/skunk.png" alt="Skunk mascot" width="300">
+</p>
+
+<p align="center">
+  <b>Research by <a href="https://github.com/mobcat40/ComfyUI-PromptChain">ComfyUI-PromptChain</a></b>
+</p>
+
 Fixes for building custom nodes with dynamic input slots and custom editors in ComfyUI.
 
 ## What This Does
