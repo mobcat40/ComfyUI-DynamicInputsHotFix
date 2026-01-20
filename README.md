@@ -1,87 +1,208 @@
-# ComfyUI-DynamicInputsHotFix
+# ComfyUI-FrontendPatches
 
-Workarounds for dynamic input rendering bugs in ComfyUI's Vue frontend.
+A reference implementation for **dynamic input slots** in ComfyUI custom nodes, plus two frontend patches for building nodes with custom editors (CodeMirror, Monaco, etc.).
 
-![Dynamic Inputs Demo](screenshots/intro.png)
+> **Tested with ComfyUI v0.9.2** (January 2026)
 
-## What Are Dynamic Inputs?
+## Dynamic Input Slots
 
-Dynamic inputs allow a node to spawn unlimited input sockets on-the-fly as you connect wires to it. Instead of having a fixed number of inputs, the node automatically creates new slots when you connect something, and removes them when you disconnect. This is useful for nodes that need to accept a variable number of inputs (like merge nodes, concat nodes, etc.).
+The main feature: input slots that autogrow as you connect to them.
 
-The technique uses the `*` (asterisk) type to accept any connection, then inherits the actual type from whatever gets connected. Credit to [cozy_ex_dynamic](https://github.com/cozy-comfyui/cozy_ex_dynamic) for the original implementation pattern.
+### How It Works
 
-## The Problem
+```javascript
+// In your node's beforeRegisterNodeDef:
+const onNodeCreated = nodeType.prototype.onNodeCreated;
+nodeType.prototype.onNodeCreated = async function() {
+    const result = onNodeCreated?.apply(this);
 
-Since the Vue nodes merge (~September 2025), custom nodes using dynamic inputs (`this.addInput()` in JavaScript) have visual bugs:
+    // Start with one empty slot
+    this.addInput("input", "*");
 
-1. **New slots don't render** until page refresh
-2. **Slot colors don't update** when type changes on connect
-3. **Slot colors stay stale** after disconnect (unfixable from extension)
+    return result;
+};
 
-This affects any node using `addInput()`/`removeInput()` in `onConnectionsChange`, including [cozy_ex_dynamic](https://github.com/cozy-comfyui/cozy_ex_dynamic) and similar.
+const onConnectionsChange = nodeType.prototype.onConnectionsChange;
+nodeType.prototype.onConnectionsChange = function(slotType, slot_idx, isConnect, link_info, node_slot) {
+    const result = onConnectionsChange?.apply(this, arguments);
 
-## What This Provides
+    // Only handle input slots (slotType === 1)
+    if (slotType !== 1) return result;
 
-- **Example node** (`Dynamic Inputs`) demonstrating working dynamic inputs
-- **Workarounds** documented in code that other node authors can copy
-- **Bug documentation** with root cause analysis
+    if (link_info && isConnect) {
+        // On connect: inherit type from source
+        const fromNode = this.graph._nodes.find(n => n.id === link_info.origin_id);
+        if (fromNode) {
+            const parentSlot = fromNode.outputs[link_info.origin_slot];
+            if (parentSlot) {
+                node_slot.type = parentSlot.type;
+                node_slot.name = "input_connected";
+            }
+        }
+    } else if (!isConnect) {
+        // On disconnect: remove the slot
+        this.removeInput(slot_idx);
+    }
+
+    // Cleanup: remove orphaned unlinked slots, renumber, ensure one empty at end
+    let idx = 0;
+    let count = 0;
+    while (idx < this.inputs.length) {
+        const slot = this.inputs[idx];
+        if (slot.link === null && idx < this.inputs.length - 1) {
+            this.removeInput(idx);
+            continue;
+        }
+        count++;
+        slot.name = slot.link !== null ? `input_${count}` : "input";
+        idx++;
+    }
+
+    // Always have one empty slot ready
+    const last = this.inputs[this.inputs.length - 1];
+    if (!last || last.link !== null) {
+        this.addInput("input", "*");
+    }
+
+    return result;
+};
+```
+
+### Key Points
+
+- **No Vue hacks needed** - ComfyUI v0.9.2 fixed the reactivity issue. `addInput()`/`removeInput()` just work now.
+- Use `slotType === 1` for inputs, `slotType === 2` for outputs
+- The `"*"` type accepts any connection
+- Clean up orphans to prevent slot buildup
+
+---
+
+## Frontend Patches
+
+Two patches for building nodes with custom editors (like CodeMirror):
+
+### Patch 1: tagName Spoof (Ctrl+Z Fix)
+
+**Problem**: ComfyUI's ChangeTracker only recognizes `INPUT` and `TEXTAREA` for undo/redo. ContentEditable divs (used by CodeMirror, Monaco, etc.) get their Ctrl+Z hijacked - it deletes the node instead of undoing text.
+
+**Fix**: Spoof `Element.prototype.tagName` to return `'INPUT'` for contentEditable elements.
+
+```javascript
+Object.defineProperty(Element.prototype, 'tagName', {
+    get: function() {
+        const realTagName = originalDescriptor.get.call(this);
+
+        // Spoof for contentEditable
+        if (realTagName === 'DIV' && this.contentEditable === 'true') {
+            return 'INPUT';
+        }
+
+        // Spoof for CodeMirror
+        if (realTagName === 'DIV' && this.closest?.('.cm-editor')) {
+            if (this.classList?.contains('cm-content')) {
+                return 'INPUT';
+            }
+        }
+
+        return realTagName;
+    },
+    configurable: true,
+    enumerable: true
+});
+```
+
+### Patch 2: Node Selection Prevention
+
+**Problem**: Clicking in a contentEditable/CodeMirror editor selects the node and highlights its links. Visual flicker and unwanted state changes.
+
+**Fix**: Track clicks on isolated UI, hook `onNodeSelected`, and use triple-clear pattern (immediate + microtask + rAF) to catch all timing edge cases.
+
+```javascript
+// Track clicks on isolated elements
+window.addEventListener('pointerdown', (e) => {
+    clickedInIsolatedUI = !!e.target.closest('[contenteditable], .cm-editor');
+    if (clickedInIsolatedUI) e.stopPropagation();
+}, true);
+
+// Hook onNodeSelected
+const originalOnNodeSelected = app.canvas.onNodeSelected;
+app.canvas.onNodeSelected = function(node) {
+    if (clickedInIsolatedUI) {
+        // Triple-clear pattern
+        const clear = () => {
+            app.canvas?.deselectAll();
+            if (app.canvas) app.canvas.highlighted_links = {};
+            app.canvas?.setDirty(true, true);
+        };
+        clear();
+        Promise.resolve().then(clear);
+        requestAnimationFrame(clear);
+
+        clickedInIsolatedUI = false;
+        return;
+    }
+    return originalOnNodeSelected?.call(this, node);
+};
+```
+
+---
+
+## Settings
+
+Both patches can be toggled in ComfyUI Settings for debugging. Useful when ComfyUI updates - disable patches to see if issues are fixed upstream.
+
+A restart alert appears when settings change.
+
+---
 
 ## Installation
 
 ```bash
 cd ComfyUI/custom_nodes
-git clone https://github.com/YOUR_USERNAME/ComfyUI-DynamicInputsHotFix
+git clone https://github.com/yourusername/ComfyUI-FrontendPatches
 ```
 
-Restart ComfyUI. Find "Dynamic Inputs" node under `DynamicInputsFix` category.
+Restart ComfyUI.
 
-## Workarounds for Node Authors
+---
 
-### 1. Trigger Vue Refresh Event
+## File Structure
 
-After modifying inputs, manually trigger the event that Vue listens for:
-
-```javascript
-this.graph?.trigger?.('node:slot-links:changed', {
-    nodeId: this.id,
-    slotType: 1,  // INPUT
-    slotIndex: slot_idx,
-    connected: isConnect,
-    linkId: link_info?.id ?? -1
-});
-this.graph?.setDirtyCanvas?.(true, true);
+```
+ComfyUI-FrontendPatches/
+├── __init__.py         # Python node (DynamicInputs demo)
+├── web/
+│   └── main.js         # All patches + demo node JS
+└── README.md
 ```
 
-### 2. Replace Slot Object on Type Change
+---
 
-When changing a slot's type, replace the object to trigger Vue reactivity:
+## Demo Node
 
-```javascript
-node_slot.type = parent_link.type;
-this.inputs[slot_idx] = { ...node_slot };  // Creates new object reference
-```
+The "Dynamic Inputs (Demo)" node under `FrontendPatches` category demonstrates:
 
-### 3. CSS for Custom Type Colors
+1. **Dynamic input slots** - Connect any output, new slot appears
+2. **Patch 1** - Type in the contentEditable box, Ctrl+Z undoes text (not the node)
+3. **Patch 2** - Click in the editor, node doesn't get selected
 
-Vue ignores `color_on`/`color_off`. Inject CSS instead:
+---
 
-```javascript
-const style = document.createElement('style');
-style.textContent = `
-    :root {
-        --color-datatype-\\*: #888;
-        --color-datatype-MYCUSTOMTYPE: #f80;
-    }
-`;
-document.head.appendChild(style);
-```
+## Compatibility
 
-## Known Limitations
+| ComfyUI Version | Dynamic Inputs | Patch 1 (tagName) | Patch 2 (Selection) |
+|-----------------|----------------|-------------------|---------------------|
+| v0.9.2+         | Native         | Required          | Required            |
 
-**Disconnect color bug is unfixable** from extensions. When disconnecting, the new empty slot keeps the old slot's color until page refresh. This requires an upstream fix to `NodeSlots.vue` (using better component keys).
+Vue reactivity for `addInput()`/`removeInput()` was fixed upstream in v0.9.2. The two patches are still required for custom editors.
 
-See [COMFYUI_DYNAMIC_INPUT_BUG.md](COMFYUI_DYNAMIC_INPUT_BUG.md) for full technical details.
+---
 
 ## License
 
 MIT
+
+## Credits
+
+- Dynamic inputs pattern inspired by [cozy_ex_dynamic](https://github.com/cozy-comfyui/cozy_ex_dynamic)
+- Patches developed for [ComfyUI-PromptChain](https://github.com/anthropics/ComfyUI-PromptChain)
